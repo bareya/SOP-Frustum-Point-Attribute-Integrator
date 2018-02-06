@@ -51,65 +51,9 @@ struct FrustumPointAttributeIntegrator
     void addDependency(OP_Node* node);
     void prependTransform(OBJ_Node* node, OP_Context& context);
 
-    void appendPosition(const UT_Vector4D& position, GA_Index index)
-    {
-        UT_Vector4D camPos = position * m_worldToCamera;
-        UT_Vector4 pos = camPos * m_projection;
-        pos /= pos.w();
-        pos.x() = 0;
-
-        UT_Vector3F posF(pos);
-        if (m_volume->isInside(posF))
-        {
-            int z;
-            m_volume->posToIndex(posF, m_indexx[index], m_indexy[index], z);
-            size_t tileIndex = m_volumeWriteHandle->indexToLinearTile(m_indexx[index], m_indexy[index], z);
-            m_tiles[tileIndex].emplace_back(-camPos.z(), index);
-        }
-    }
-
-    void assignPointsToTiles(const GU_Detail* gdp)
-    {
-        size_t npt = static_cast<size_t>(gdp->getNumPoints());
-        m_indexx.resize(npt);
-        m_indexy.resize(npt);
-
-        UTparallelForLightItems(UT_BlockedRange<GA_Index>(0, gdp->getNumPoints()),
-                                [&](const UT_BlockedRange<GA_Index>& r) {
-                                    for (auto it = r.begin(); it != r.end(); ++it)
-                                    {
-                                        appendPosition(gdp->getPos4(gdp->pointOffset(it)), it);
-                                    }
-                                });
-    }
-
-    void setAttribute(GU_Detail* gdp)
-    {
-        GA_RWHandleF occlusion = gdp->addFloatTuple(GA_ATTRIB_POINT, GA_SCOPE_PUBLIC, "occlusion", 1);
-
-        // iterate over tails
-        UTparallelForHeavyItems(UT_BlockedRange<size_t>(0, m_tiles.size()),
-                                [&](const UT_BlockedRange<size_t>& r) {
-                                    for (auto tileIt = r.begin(); tileIt != r.end(); ++tileIt)
-                                    {
-                                        TileData* tile = &m_tiles[tileIt];
-
-                                        // sort points in the tile, sort them by z
-                                        std::sort(tile->begin(), tile->end(), [](const DIPair& left, const DIPair& right) {
-                                            return left.first < right.first;
-                                        });
-
-                                        // iterate over sotred points and increment attribute
-                                        for (auto it = tile->begin(); it != tile->end(); ++it)
-                                        {
-                                            const DIPair* pair = &(*it);
-                                            fpreal32 value = m_volumeWriteHandle->getValue(m_indexx[pair->second], m_indexy[pair->second], 0);
-                                            occlusion.set(gdp->pointOffset(pair->second), value);
-                                            m_volumeWriteHandle->setValue(m_indexx[pair->second], m_indexy[pair->second], 0, value + 1);
-                                        }
-                                    }
-                                });
-    }
+    UT_Vector3F appendPosition(const UT_Vector4D& position, GA_Index index);
+    void assignPointsToTiles(GU_Detail* gdp);
+    void setAttribute(GU_Detail* gdp);
 
 private:
     OBJ_Camera* m_camera{};
@@ -262,4 +206,68 @@ void FrustumPointAttributeIntegrator::prependTransform(OBJ_Node* node, OP_Contex
 
     // update world and current
     m_worldToCamera = parentXform * m_worldToCamera;
+}
+
+UT_Vector3F FrustumPointAttributeIntegrator::appendPosition(const UT_Vector4D& position, GA_Index index)
+{
+    UT_Vector4D camPos = position * m_worldToCamera;
+    UT_Vector4 pos = camPos * m_projection;
+    pos /= pos.w();
+    pos.z() = 0;
+
+    UT_Vector3F posF(pos);
+    if (m_volume->isInside(posF))
+    {
+        int z;
+        m_volume->posToIndex(posF, m_indexx[index], m_indexy[index], z);
+        size_t tileIndex = m_volumeWriteHandle->indexToLinearTile(m_indexx[index], m_indexy[index], z);
+        m_tiles[tileIndex].emplace_back(-camPos.z(), index);
+    }
+
+    posF.z() = -camPos.z();
+    return posF;
+}
+
+void FrustumPointAttributeIntegrator::assignPointsToTiles(GU_Detail* gdp)
+{
+    size_t npt = static_cast<size_t>(gdp->getNumPoints());
+    m_indexx.resize(npt);
+    m_indexy.resize(npt);
+
+    UTparallelForLightItems(UT_BlockedRange<GA_Index>(0, gdp->getNumPoints()),
+                            [&](const UT_BlockedRange<GA_Index>& r) {
+                                for (auto it = r.begin(); it != r.end(); ++it)
+                                {
+                                    auto newPos = appendPosition(gdp->getPos4(gdp->pointOffset(it)), it);
+                                    // gdp->setPos3(gdp->pointOffset(it), newPos);
+                                }
+                            });
+}
+
+void FrustumPointAttributeIntegrator::setAttribute(GU_Detail* gdp)
+{
+    GA_RWHandleF occlusion = gdp->addFloatTuple(GA_ATTRIB_POINT, GA_SCOPE_PUBLIC, "occlusion", 1);
+
+    // iterate over tails
+    UTparallelForHeavyItems(UT_BlockedRange<size_t>(0, m_tiles.size()),
+                            [&](const UT_BlockedRange<size_t>& r) {
+                                for (auto tileIt = r.begin(); tileIt != r.end(); ++tileIt)
+                                {
+                                    TileData* tile = &m_tiles[tileIt];
+
+                                    // sort points in the tile, sort them by z
+                                    std::sort(tile->begin(), tile->end(), [](const DIPair& left, const DIPair& right) {
+                                        return left.first < right.first;
+                                    });
+
+                                    // iterate over sotred points and increment attribute
+                                    for (auto it = tile->begin(); it != tile->end(); ++it)
+                                    {
+                                        const DIPair* pair = &(*it);
+                                        fpreal32 value = m_volumeWriteHandle->getValue(m_indexx[pair->second], m_indexy[pair->second], 0);
+                                        occlusion.set(gdp->pointOffset(pair->second), value);
+                                        m_volumeWriteHandle->setValue(m_indexx[pair->second], m_indexy[pair->second], 0, value + 1);
+                                    }
+                                }
+                            });
 }
